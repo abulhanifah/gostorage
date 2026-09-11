@@ -1,6 +1,7 @@
 package gostorage
 
 import (
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -8,6 +9,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/credentials"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
+	"github.com/aws/aws-sdk-go-v2/service/s3/types"
 )
 
 // s3Client implements Client for AWS S3 using the official AWS SDK for Go v2
@@ -90,7 +92,29 @@ func (c *s3Client) GetPublicURL(key string) string {
 }
 
 // GetSize implements Client.
+//
+// S3 has no server-side operation that returns the aggregate size of a
+// prefix; the only way to size a directory is to list its objects. As an
+// optimization, when prefix is a concrete object key the size is read directly
+// from the object metadata with a single call (HeadObject) instead of listing
+// it. The fast path is skipped for prefixes ending in "/" because such keys
+// are usually zero-byte folder placeholders that also share the prefix with
+// real objects.
 func (c *s3Client) GetSize(prefix string) (int64, error) {
+	prefix = strings.TrimSpace(prefix)
+	if prefix != "" && !strings.HasSuffix(prefix, "/") {
+		out, err := c.client.HeadObject(c.config.Context, &s3.HeadObjectInput{
+			Bucket: aws.String(c.config.Bucket),
+			Key:    aws.String(prefix),
+		})
+		if err == nil {
+			return aws.ToInt64(out.ContentLength), nil
+		}
+		var nf *types.NotFound
+		if !errors.As(err, &nf) {
+			return 0, fmt.Errorf("gostorage s3: head object: %w", err)
+		}
+	}
 	var total int64
 	objs, err := c.ListObjects(prefix)
 	if err != nil {

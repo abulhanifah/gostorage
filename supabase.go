@@ -123,7 +123,23 @@ func supabaseObjectSize(metadata any) int64 {
 }
 
 // GetSize implements Client.
+//
+// Supabase has no server-side operation that returns the aggregate size of a
+// prefix; the only way to size a directory is to list its objects. As an
+// optimization, when prefix is a concrete object key the size is read directly
+// from the object metadata (POST /object/info/public/...) with a single call
+// instead of listing it. The fast path is skipped for prefixes ending in "/"
+// because such keys are usually zero-byte folder placeholders that also share
+// the prefix with real objects. Any failure of the info lookup (missing
+// object, API error, network error) falls back to listing, which remains the
+// source of truth.
 func (c *supabaseClient) GetSize(prefix string) (int64, error) {
+	prefix = strings.TrimSpace(prefix)
+	if prefix != "" && !strings.HasSuffix(prefix, "/") {
+		if size, ok := c.objectSize(prefix); ok {
+			return size, nil
+		}
+	}
 	objects, err := c.listFiles(prefix)
 	if err != nil {
 		return 0, err
@@ -133,6 +149,23 @@ func (c *supabaseClient) GetSize(prefix string) (int64, error) {
 		total += obj.Size
 	}
 	return total, nil
+}
+
+// objectSize returns the size of the single object at key, read from its
+// metadata, and whether the lookup succeeded. A non-object key (or any API
+// failure) reports ok=false so callers can fall back to listing.
+func (c *supabaseClient) objectSize(key string) (int64, bool) {
+	req, err := c.client.NewRequest("POST", c.baseURL+"/object/info/public/"+c.bucket+"/"+normalizeKey(key), struct{}{})
+	if err != nil {
+		return 0, false
+	}
+	var info struct {
+		Metadata any `json:"metadata"`
+	}
+	if _, err := c.client.Do(req, &info); err != nil {
+		return 0, false
+	}
+	return supabaseObjectSize(info.Metadata), true
 }
 
 // ListObjects implements Client.

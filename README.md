@@ -4,15 +4,16 @@ Secure & scalable file management library for Go. Effortlessly handle frontend
 direct-to-storage uploads, presigned access links, and storage operations.
 
 `gostorage` is a provider-agnostic object storage client for Go. It exposes one
-interface across four providers and only ever hands out **presigned** or
+interface across five providers and only ever hands out **presigned** or
 **public** URLs — credentials never reach the client:
 
-| Provider          | Kind (`gostorage.Kind`) | Library                                                                                          |
-| ----------------- | ------------------------- | ------------------------------------------------------------------------------------------------ |
-| AWS S3            | `KindS3`                | [aws-sdk-go-v2/service/s3](https://github.com/aws/aws-sdk-go-v2) (official)                       |
-| MinIO             | `KindMinio`             | [minio-go](https://github.com/minio/minio-go) (MinIO's official SDK)                              |
-| Supabase Storage  | `KindSupabase`          | [supabase-community/storage-go](https://github.com/supabase-community/storage-go) (official)      |
-| Alibaba Cloud OSS | `KindOSS`               | [alibabacloud-oss-go-sdk-v2/oss](https://github.com/aliyun/alibabacloud-oss-go-sdk-v2) (official) |
+| Provider              | Kind (`gostorage.Kind`) | Library                                                                                          |
+| --------------------- | ------------------------- | ------------------------------------------------------------------------------------------------ |
+| AWS S3                | `KindS3`                | [aws-sdk-go-v2/service/s3](https://github.com/aws/aws-sdk-go-v2) (official)                       |
+| MinIO                 | `KindMinio`             | [minio-go](https://github.com/minio/minio-go) (MinIO's official SDK)                              |
+| Supabase Storage      | `KindSupabase`          | [supabase-community/storage-go](https://github.com/supabase-community/storage-go) (official)      |
+| Alibaba Cloud OSS     | `KindOSS`               | [alibabacloud-oss-go-sdk-v2/oss](https://github.com/aliyun/alibabacloud-oss-go-sdk-v2) (official) |
+| Google Cloud Storage  | `KindGCS`               | [cloud.google.com/go/storage](https://cloud.google.com/go/storage) (official)                     |
 
 ## Features
 
@@ -24,12 +25,32 @@ interface across four providers and only ever hands out **presigned** or
   (e.g. a logical sub-bucket).
 - **Delete** — hard-delete objects.
 
+## Size lookups
+
+None of the supported providers has a server-side "directory size" API, so
+`GetSize` sizes a real directory by listing it and summing the objects. As an
+optimization, every provider reads the size of a **single object** straight
+from its metadata with one request instead of listing it:
+
+| Provider    | Metadata call                          |
+| ----------- | -------------------------------------- |
+| AWS S3      | `HeadObject`                           |
+| MinIO       | `StatObject`                           |
+| Supabase    | `POST /object/info/public/{bucket}/{k}` |
+| OSS         | `HeadObject`                           |
+| GCS         | `ObjectHandle.Attrs`                    |
+
+The single-object fast path only fires when `prefix` is a bare key (does not
+end in `/`); trailing-slash prefixes are treated as directories and always
+listed, because such keys are usually zero-byte folder placeholders that also
+share the prefix with real objects.
+
 ## Install
 
 ```sh
-go get gostorage
+go get github.com/abulhanifah/gostorage
 # or point it at this module directly:
-go mod edit -replace gostorage=../gostorage
+go mod edit -replace github.com/abulhanifah/gostorage=../gostorage
 ```
 
 ## Run MinIO locally (Docker)
@@ -76,12 +97,12 @@ import (
 	"fmt"
 	"time"
 
-	"gostorage"
+	"github.com/abulhanifah/gostorage"
 )
 
 func main() {
 	client, err := gostorage.New(gostorage.Config{
-		Kind:      gostorage.KindS3, // s3 | minio | supabase | oss
+		Kind:      gostorage.KindS3, // s3 | minio | supabase | oss | gcs
 		Name:      "chum-bucket",
 		Endpoint:  "s3.amazonaws.com",
 		Region:    "ap-southeast-3",
@@ -123,7 +144,28 @@ s3, _      := gostorage.NewS3(cfg)
 mini, _    := gostorage.NewMinio(cfg)   // path-style URLs
 supa, _    := gostorage.NewSupabase(cfg) // REST API, Bearer <AccessKey>
 oss, _     := gostorage.NewOSS(cfg)
+gcs, _     := gostorage.NewGCS(cfg)     // see Google Cloud Storage below
 ```
+
+### Google Cloud Storage
+
+```go
+// Service account key JSON (contents, from the GCP console):
+gcs, _ := gostorage.NewGCS(gostorage.Config{
+	Type:      "private-gcs",
+	Name:      "my-bucket",            // bucket name (or set Bucket)
+	SecretKey: `<contents of the service account key JSON>`,
+})
+```
+
+| Config field         | GCS meaning                                                                                 |
+| -------------------- | ------------------------------------------------------------------------------------------- |
+| `SecretKey`          | Full service account key JSON **or** a PEM-encoded private key.                             |
+| `AccessKey`          | Overrides the signing identity. With a PEM `SecretKey`, it must hold the service account client email. |
+| (neither)            | Falls back to [Application Default Credentials](https://cloud.google.com/docs/authentication/application-default-credentials) for client operations (list/delete). |
+
+Signed URLs are V4 signatures computed **locally** from the service account
+private key, so no network call or IAM permission is needed to mint them.
 
 ## Configuration
 
@@ -132,7 +174,7 @@ oss, _     := gostorage.NewOSS(cfg)
 | Field                         | Description                                                                                                                                                             |
 | ----------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `Type`                      | Optional label of the form`"<qualifier>-<kind>"` (e.g. `"acme-s3"`) or a bare `"s3"`. Used to derive `Kind` when empty and preserved as returned by `Type()`. |
-| `Kind`                      | Raw provider kind (`KindS3`, `KindMinio`, `KindSupabase`, `KindOSS`). Derived from `Type` when empty.                                                         |
+| `Kind`                      | Raw provider kind (`KindS3`, `KindMinio`, `KindSupabase`, `KindOSS`, `KindGCS`). Derived from `Type` when empty.                                                         |
 | `Name`                      | Logical storage name.                                                                                                                                                   |
 | `Bucket`                    | Bucket inside the provider. Defaults to`Name` when empty.                                                                                                             |
 | `Endpoint`                  | Provider endpoint, with or without`http(s)://` scheme (TLS by default).                                                                                               |
@@ -151,6 +193,7 @@ normalized to `<ref>.supabase.co` so REST and public URLs target
 - **MinIO** — path-style: `https://{endpoint}/{bucket}/{key}`
 - **Supabase** — `https://{ref}.supabase.co/storage/v1/object/public/{bucket}/{key}`
 - **OSS** — virtual-hosted: `https://{bucket}.{endpoint}/{key}`
+- **GCS** — path-style: `https://storage.googleapis.com/{bucket}/{key}`
 
 ## License
 

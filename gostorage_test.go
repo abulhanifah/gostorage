@@ -1,10 +1,39 @@
 package gostorage
 
 import (
+	"crypto/rand"
+	"crypto/rsa"
+	"crypto/x509"
+	"encoding/json"
+	"encoding/pem"
 	"strings"
 	"testing"
 	"time"
 )
+
+// gcsTestKey returns a syntactically valid Google service account key JSON
+// with a freshly generated RSA private key, so GCS clients and V4 signed URLs
+// can be exercised without network access.
+func gcsTestKey(t *testing.T) []byte {
+	t.Helper()
+	priv, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatalf("generate rsa key: %v", err)
+	}
+	keyPEM := pem.EncodeToMemory(&pem.Block{Type: "RSA PRIVATE KEY", Bytes: x509.MarshalPKCS1PrivateKey(priv)})
+	b, err := json.Marshal(map[string]string{
+		"type":           "service_account",
+		"project_id":     "test-project",
+		"private_key_id": "test-key-id",
+		"client_email":   "storage-test@test-project.iam.gserviceaccount.com",
+		"client_id":      "1234567890",
+		"private_key":    string(keyPEM),
+	})
+	if err != nil {
+		t.Fatalf("marshal service account key: %v", err)
+	}
+	return b
+}
 
 func TestParseType(t *testing.T) {
 	tests := []struct {
@@ -16,6 +45,7 @@ func TestParseType(t *testing.T) {
 		{"private-oss", "private", KindOSS},
 		{"private-minio", "private", KindMinio},
 		{"zahir-supabase", "zahir", KindSupabase},
+		{"zahir-gcs", "zahir", KindGCS},
 		{"acme-s3", "acme", KindS3},
 		{"s3", "", KindS3},
 		{"oss", "", KindOSS},
@@ -84,6 +114,12 @@ func TestNewFactory(t *testing.T) {
 	} else if _, ok := c.(*ossClient); !ok {
 		t.Errorf("NewOSS returned %T, want *ossClient", c)
 	}
+	gcs := Config{Name: "x", Endpoint: "storage.googleapis.com", SecretKey: string(gcsTestKey(t))}
+	if c, err := NewGCS(gcs); err != nil {
+		t.Fatalf("NewGCS: %v", err)
+	} else if _, ok := c.(*gcsClient); !ok {
+		t.Errorf("NewGCS returned %T, want *gcsClient", c)
+	}
 
 	if _, err := New(Config{Type: "zahir-ftp"}); err == nil {
 		t.Error("New should reject unknown kind")
@@ -144,6 +180,12 @@ func TestPublicURLs(t *testing.T) {
 			cfg:  Config{Type: "private-oss", Name: "att", Endpoint: "http://oss-ap-southeast-1.aliyuncs.com"},
 			key:  "doc/x.pdf",
 			want: "http://att.oss-ap-southeast-1.aliyuncs.com/doc/x.pdf",
+		},
+		{
+			name: "gcs",
+			cfg:  Config{Type: "acme-gcs", Name: "att", SecretKey: string(gcsTestKey(t))},
+			key:  "img/1.png",
+			want: "https://storage.googleapis.com/att/img/1.png",
 		},
 	}
 	for _, tt := range tests {
@@ -209,8 +251,48 @@ func TestOSSPresignShape(t *testing.T) {
 	}
 }
 
+func TestGCSPresignShape(t *testing.T) {
+	c, err := NewGCS(Config{
+		Type:      "private-gcs",
+		Name:      "att",
+		AccessKey: "storage-test@test-project.iam.gserviceaccount.com",
+		SecretKey: string(gcsTestKey(t)),
+	})
+	if err != nil {
+		t.Fatalf("NewGCS: %v", err)
+	}
+	u, err := c.GetPresignedUploadURL("data/file.txt", "text/plain", time.Minute)
+	if err != nil {
+		t.Fatalf("GetPresignedUploadURL: %v", err)
+	}
+	if !strings.HasPrefix(u, "https://storage.googleapis.com/att/data/file.txt?") {
+		t.Errorf("unexpected upload URL %q", u)
+	}
+	for _, param := range []string{"X-Goog-Algorithm=GOOG4-RSA-SHA256", "X-Goog-Credential", "X-Goog-Expires", "X-Goog-SignedHeaders=content-type", "X-Goog-Signature"} {
+		if !strings.Contains(u, param) {
+			t.Errorf("upload URL missing %q: %s", param, u)
+		}
+	}
+	gu, err := c.GetPresignedGetURL("data/file.txt", time.Minute)
+	if err != nil {
+		t.Fatalf("GetPresignedGetURL: %v", err)
+	}
+	if !strings.HasPrefix(gu, "https://storage.googleapis.com/att/data/file.txt?") {
+		t.Errorf("unexpected get URL %q", gu)
+	}
+	if !strings.Contains(gu, "X-Goog-Signature=") {
+		t.Errorf("get URL missing signature: %s", gu)
+	}
+}
+
+func TestGCSPresignWithoutKey(t *testing.T) {
+	if _, err := NewGCS(Config{Type: "gcs", Name: "att", AccessKey: "usergranteduser@developer.gserviceaccount.com"}); err == nil {
+		t.Error("NewGCS should reject an access key without a private key")
+	}
+}
+
 func TestSupportedKinds(t *testing.T) {
-	if got := SupportedKinds(); len(got) != 4 {
-		t.Errorf("SupportedKinds len = %d, want 4", len(got))
+	if got := SupportedKinds(); len(got) != 5 {
+		t.Errorf("SupportedKinds len = %d, want 5", len(got))
 	}
 }

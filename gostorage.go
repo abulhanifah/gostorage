@@ -1,6 +1,6 @@
 // Package gostorage provides a unified, provider-agnostic client for object
-// storage. It supports AWS S3, MinIO, Supabase Storage and Alibaba Cloud OSS
-// through a single interface:
+// storage. It supports AWS S3, MinIO, Supabase Storage, Alibaba Cloud OSS and
+// Google Cloud Storage through a single interface:
 //
 //   - presigned upload and download URLs (browser direct-to-storage uploads),
 //   - public URLs,
@@ -52,10 +52,13 @@ const (
 
 	// KindOSS is Alibaba Cloud Object Storage Service.
 	KindOSS Kind = "oss"
+
+	// KindGCS is Google Cloud Storage.
+	KindGCS Kind = "gcs"
 )
 
 // knownKinds is the canonical set of supported providers.
-var knownKinds = []Kind{KindS3, KindMinio, KindSupabase, KindOSS}
+var knownKinds = []Kind{KindS3, KindMinio, KindSupabase, KindOSS, KindGCS}
 
 // SupportedKinds returns all storage kinds supported by this library.
 func SupportedKinds() []Kind {
@@ -72,8 +75,8 @@ type Config struct {
 	// Kind is not set; a plain kind such as "s3" is also accepted.
 	Type string
 
-	// Kind is the raw provider kind: one of KindS3, KindMinio, KindSupabase
-	// or KindOSS. Derived from Type when empty.
+	// Kind is the raw provider kind: one of KindS3, KindMinio, KindSupabase,
+	// KindOSS or KindGCS. Derived from Type when empty.
 	Kind Kind
 
 	// Name is the user-facing storage name (e.g. "chum-bucket").
@@ -257,6 +260,8 @@ func New(cfg Config) (Client, error) {
 		return newSupabase(c)
 	case KindOSS:
 		return newOSS(c)
+	case KindGCS:
+		return newGCS(c)
 	default:
 		// Unreachable: normalize already validated the kind.
 		return nil, fmt.Errorf("gostorage: unsupported storage kind %q", c.Kind)
@@ -286,6 +291,12 @@ func NewSupabase(cfg Config) (Client, error) {
 // NewOSS builds an Alibaba Cloud OSS client. cfg.Kind is forced to KindOSS.
 func NewOSS(cfg Config) (Client, error) {
 	cfg.Kind = KindOSS
+	return New(cfg)
+}
+
+// NewGCS builds a Google Cloud Storage client. cfg.Kind is forced to KindGCS.
+func NewGCS(cfg Config) (Client, error) {
+	cfg.Kind = KindGCS
 	return New(cfg)
 }
 

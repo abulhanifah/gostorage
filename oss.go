@@ -1,7 +1,10 @@
 package gostorage
 
 import (
+	"errors"
 	"fmt"
+	"net/http"
+	"strings"
 	"time"
 
 	oss "github.com/aliyun/alibabacloud-oss-go-sdk-v2/oss"
@@ -69,7 +72,29 @@ func (c *ossClient) GetPublicURL(key string) string {
 }
 
 // GetSize implements Client.
+//
+// OSS has no server-side operation that returns the aggregate size of a
+// prefix; the only way to size a directory is to list its objects. As an
+// optimization, when prefix is a concrete object key the size is read directly
+// from the object metadata with a single call (HeadObject) instead of listing
+// it. The fast path is skipped for prefixes ending in "/" because such keys
+// are usually zero-byte folder placeholders that also share the prefix with
+// real objects.
 func (c *ossClient) GetSize(prefix string) (int64, error) {
+	prefix = strings.TrimSpace(prefix)
+	if prefix != "" && !strings.HasSuffix(prefix, "/") {
+		res, err := c.client.HeadObject(c.config.Context, &oss.HeadObjectRequest{
+			Bucket: oss.Ptr(c.config.Bucket),
+			Key:    oss.Ptr(prefix),
+		})
+		if err == nil {
+			return res.ContentLength, nil
+		}
+		var se *oss.ServiceError
+		if !errors.As(err, &se) || se.StatusCode != http.StatusNotFound {
+			return 0, fmt.Errorf("gostorage oss: head object: %w", err)
+		}
+	}
 	var total int64
 	objs, err := c.ListObjects(prefix)
 	if err != nil {

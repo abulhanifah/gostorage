@@ -3,6 +3,7 @@ package gostorage
 import (
 	"fmt"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/minio/minio-go/v7"
@@ -88,7 +89,26 @@ func (c *minioClient) GetPublicURL(key string) string {
 }
 
 // GetSize implements Client.
+//
+// MinIO has no server-side operation that returns the aggregate size of a
+// prefix; the only way to size a directory is to list its objects. As an
+// optimization, when prefix is a concrete object key the size is read directly
+// from the object metadata with a single call (StatObject) instead of listing
+// it. The fast path is skipped for prefixes ending in "/" because such keys
+// are usually zero-byte folder placeholders that also share the prefix with
+// real objects.
 func (c *minioClient) GetSize(prefix string) (int64, error) {
+	prefix = strings.TrimSpace(prefix)
+	if prefix != "" && !strings.HasSuffix(prefix, "/") {
+		info, err := c.client.StatObject(c.config.Context, c.config.Bucket, prefix, minio.StatObjectOptions{})
+		if err == nil {
+			return info.Size, nil
+		}
+		resp := minio.ToErrorResponse(err)
+		if resp.StatusCode != http.StatusNotFound && !strings.EqualFold(resp.Code, "NoSuchKey") {
+			return 0, fmt.Errorf("gostorage minio: stat object: %w", err)
+		}
+	}
 	var total int64
 	opts := minio.ListObjectsOptions{Prefix: prefix, Recursive: true}
 	for obj := range c.client.ListObjects(c.config.Context, c.config.Bucket, opts) {
