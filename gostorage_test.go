@@ -6,6 +6,10 @@ import (
 	"crypto/x509"
 	"encoding/json"
 	"encoding/pem"
+	"net/url"
+	"os"
+	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -134,6 +138,210 @@ func TestNewFactory(t *testing.T) {
 
 	if _, err := New(Config{Type: "zahir-ftp"}); err == nil {
 		t.Error("New should reject unknown kind")
+	}
+}
+
+// TestLocalFilesystem exercises the local filesystem client end to end: URLs
+// resolve to file paths and missing prefixes size zero and list no objects
+// instead of erroring.
+func TestLocalFilesystem(t *testing.T) {
+	dir := t.TempDir()
+	client, err := NewLocal(Config{
+		Type:     "zahir-local",
+		Name:     "local-store",
+		Bucket:   "local-store",
+		Endpoint: dir,
+	})
+	if err != nil {
+		t.Fatalf("NewLocal: %v", err)
+	}
+
+	// missing prefix: nothing stored, zero size, no objects, no error
+	if size, err := client.GetSize("does-not-exist"); err != nil {
+		t.Errorf("GetSize(missing prefix) = %v, want nil", err)
+	} else if size != 0 {
+		t.Errorf("GetSize(missing prefix) = %d, want 0", size)
+	}
+	if objs, err := client.ListObjects("does-not-exist"); err != nil {
+		t.Errorf("ListObjects(missing prefix) = %v, want nil", err)
+	} else if len(objs) != 0 {
+		t.Errorf("ListObjects(missing prefix) = %v, want empty", objs)
+	}
+
+	// write a file under a sub-bucket prefix
+	key := "company-a/reports/ann.pdf"
+	full := filepath.Join(dir, key)
+	if err := os.MkdirAll(filepath.Dir(full), 0755); err != nil {
+		t.Fatalf("MkdirAll: %v", err)
+	}
+	if err := os.WriteFile(full, []byte("hello world"), 0644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	// the file key resolves to the absolute filesystem path
+	got, err := client.GetPresignedUploadURL(key, "application/pdf", time.Minute)
+	if err != nil {
+		t.Fatalf("GetPresignedUploadURL: %v", err)
+	}
+	if want := full; got != want {
+		t.Errorf("GetPresignedUploadURL = %q, want %q", got, want)
+	}
+	if got := client.GetPublicURL(key); got != full {
+		t.Errorf("GetPublicURL = %q, want %q", got, full)
+	}
+
+	// exact-file GetSize returns its size
+	if size, err := client.GetSize(key); err != nil {
+		t.Errorf("GetSize(file) = %v, want nil", err)
+	} else if size != 11 {
+		t.Errorf("GetSize(file) = %d, want 11", size)
+	}
+
+	// prefix GetSize sums the directory
+	if size, err := client.GetSize("company-a"); err != nil {
+		t.Errorf("GetSize(dir) = %v, want nil", err)
+	} else if size != 11 {
+		t.Errorf("GetSize(dir) = %d, want 11", size)
+	}
+
+	// ListObjects returns keys relative to the base path
+	objs, err := client.ListObjects("company-a")
+	if err != nil {
+		t.Fatalf("ListObjects: %v", err)
+	}
+	if len(objs) != 1 || objs[0].Key != key || objs[0].Size != 11 {
+		t.Errorf("ListObjects = %#v, want single %q object of size 11", objs, key)
+	}
+
+	if err := client.DeleteObject(key); err != nil {
+		t.Fatalf("DeleteObject: %v", err)
+	}
+	if size, err := client.GetSize("company-a"); err != nil {
+		t.Errorf("GetSize after delete = %v, want nil", err)
+	} else if size != 0 {
+		t.Errorf("GetSize after delete = %d, want 0", size)
+	}
+}
+
+// TestLocalPresign verifies the local provider presigns upload and download
+// URLs into Config.PublicBaseURL when it is set, binding method, key, expiry
+// and content type into the HMAC signature.
+func TestLocalPresign(t *testing.T) {
+	const secret = "s3cret"
+	base := "https://files.example.com/storages"
+	dir := t.TempDir()
+	client, err := NewLocal(Config{
+		Type:          "zahir-local",
+		Name:          "local-store",
+		Endpoint:      dir,
+		SecretKey:     secret,
+		PublicBaseURL: base,
+	})
+	if err != nil {
+		t.Fatalf("NewLocal: %v", err)
+	}
+
+	key := "company-a/reports/ann.pdf"
+
+	// public url is unsigned, under the base, with a single slash regardless
+	// of a trailing slash on the base
+	pub := client.GetPublicURL(key)
+	if pub != base+"/"+key {
+		t.Errorf("GetPublicURL = %q, want %q", pub, base+"/"+key)
+	}
+
+	// upload url carries expires+sig and the signature is bound to the PUT
+	// method and the content type
+	upload, err := client.GetPresignedUploadURL(key, "application/pdf", time.Minute)
+	if err != nil {
+		t.Fatalf("GetPresignedUploadURL: %v", err)
+	}
+	u, err := url.Parse(upload)
+	if err != nil {
+		t.Fatalf("parse upload url %q: %v", upload, err)
+	}
+	if u.Path != "/storages/"+key {
+		t.Errorf("upload path = %q, want /storages/%s", u.Path, key)
+	}
+	expires, err := strconv.ParseInt(u.Query().Get("expires"), 10, 64)
+	if err != nil {
+		t.Fatalf("upload expires not an integer: %v", err)
+	}
+	if u.Query().Get("sig") != LocalSign(secret, "PUT", key, expires, "application/pdf") {
+		t.Errorf("upload sig does not bind PUT method and content type")
+	}
+
+	// the download url is GET-signed and content-type independent
+	download, err := client.GetPresignedGetURL(key, time.Minute)
+	if err != nil {
+		t.Fatalf("GetPresignedGetURL: %v", err)
+	}
+	d, err := url.Parse(download)
+	if err != nil {
+		t.Fatalf("parse download url %q: %v", download, err)
+	}
+	dExpires, err := strconv.ParseInt(d.Query().Get("expires"), 10, 64)
+	if err != nil {
+		t.Fatalf("download expires not an integer: %v", err)
+	}
+	if d.Query().Get("sig") != LocalSign(secret, "GET", key, dExpires, "") {
+		t.Errorf("download sig does not bind GET method")
+	}
+	if d.Query().Get("sig") == u.Query().Get("sig") {
+		t.Errorf("upload and download signatures must differ")
+	}
+
+	// LocalVerify round trips and rejects tampering on every bound field
+	cases := []struct {
+		name        string
+		method      string
+		key         string
+		expires     int64
+		contentType string
+		sig         string
+		want        bool
+	}{
+		{"valid upload", "PUT", key, expires, "application/pdf", u.Query().Get("sig"), true},
+		{"wrong method", "GET", key, expires, "application/pdf", u.Query().Get("sig"), false},
+		{"wrong key", "PUT", "company-a/other.pdf", expires, "application/pdf", u.Query().Get("sig"), false},
+		{"wrong expires", "PUT", key, expires + 1, "application/pdf", u.Query().Get("sig"), false},
+		{"wrong content type", "PUT", key, expires, "image/png", u.Query().Get("sig"), false},
+		{"tampered signature", "PUT", key, expires, "application/pdf", strings.Repeat("0", len(u.Query().Get("sig"))), false},
+		{"valid download", "GET", key, dExpires, "", d.Query().Get("sig"), true},
+		{"download with content type", "GET", key, dExpires, "application/pdf", d.Query().Get("sig"), false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := LocalVerify(secret, tc.method, tc.key, tc.expires, tc.contentType, tc.sig); got != tc.want {
+				t.Errorf("LocalVerify = %v, want %v", got, tc.want)
+			}
+		})
+	}
+
+	// content type normalization is symmetric
+	ct := "  Application/PDF  "
+	normalized := LocalSign(secret, "PUT", key, expires, ct)
+	if normalized != LocalSign(secret, "PUT", key, expires, "application/pdf") {
+		t.Errorf("content type must be normalized before signing")
+	}
+
+	// LocalVerify does not itself enforce expiry (callers do)
+	past := time.Now().Add(-time.Hour).Unix()
+	pastSig := LocalSign(secret, "PUT", key, past, "application/pdf")
+	if !LocalVerify(secret, "PUT", key, past, "application/pdf", pastSig) {
+		t.Errorf("LocalVerify must not reject on expiry by itself")
+	}
+
+	// without a public base the legacy file-path behavior is kept
+	legacy, err := NewLocal(Config{Type: "zahir-local", Name: "s", Endpoint: dir, SecretKey: secret})
+	if err != nil {
+		t.Fatalf("NewLocal legacy: %v", err)
+	}
+	if got, err := legacy.GetPresignedUploadURL(key, "application/pdf", time.Minute); err != nil || got != filepath.Join(dir, key) {
+		t.Errorf("legacy GetPresignedUploadURL = %q, %v; want file path", got, err)
+	}
+	if got := legacy.GetPublicURL(key); got != filepath.Join(dir, key) {
+		t.Errorf("legacy GetPublicURL = %q, want file path", got)
 	}
 }
 

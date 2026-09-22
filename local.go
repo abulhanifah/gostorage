@@ -1,6 +1,10 @@
 package gostorage
 
 import (
+	"crypto/hmac"
+	"crypto/sha256"
+	"crypto/subtle"
+	"encoding/hex"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -32,22 +36,79 @@ func newLocal(cfg Config) (Client, error) {
 	}, nil
 }
 
+// LocalSign signs a local filesystem object URL with an HMAC-SHA256 digest.
+//
+// Secret, method, key, expires and contentType are all bound into the
+// signature so that a signature issued for one operation cannot be reused for
+// another (including a PUT upload vs a GET download) or after its expiry has
+// passed. The key is normalized exactly as it is stored, and contentType is
+// normalized (trimmed and lower-cased), so the exact same arguments must be
+// fed to LocalVerify or to the local GetPresignedUploadURL/GetPresignedGetURL
+// implementations.
+func LocalSign(secret, method, key string, expires int64, contentType string) string {
+	h := hmac.New(sha256.New, []byte(secret))
+	fmt.Fprintf(h, "%s\n%s\n%d\n%s", strings.ToUpper(method), normalizeKey(key), expires, normalizeContentType(contentType))
+	return hex.EncodeToString(h.Sum(nil))
+}
+
+// LocalVerify reports whether signature is a valid LocalSign digest for the
+// given secret, method, key, expires and contentType. The comparison is
+// constant-time so that signature values cannot be guessed by timing.
+//
+// Expiry is intentionally not enforced here; it is the caller's job to decide
+// how to treat a signature whose expires timestamp is already in the past.
+func LocalVerify(secret, method, key string, expires int64, contentType, signature string) bool {
+	want := LocalSign(secret, method, key, expires, contentType)
+	return subtle.ConstantTimeCompare([]byte(want), []byte(strings.TrimSpace(signature))) == 1
+}
+
+// normalizeContentType normalizes a Content-Type value the same way on both
+// the signing and the verification side so the two always agree.
+func normalizeContentType(contentType string) string {
+	return strings.ToLower(strings.TrimSpace(contentType))
+}
+
+// presignURL renders the URL for key for either a PUT (upload) or GET
+// (download) operation, given the operation already decided by the caller.
+func (c *localClient) presignURL(method, key, contentType string, expiry time.Duration) (string, error) {
+	key = normalizeKey(key)
+
+	// Legacy behavior (no public base): the object is addressed by its
+	// absolute on-disk path.
+	if c.config.PublicBaseURL == "" {
+		return filepath.Join(c.basePath, key), nil
+	}
+
+	expires := time.Now().Add(expiry).Unix()
+	sig := LocalSign(c.config.SecretKey, method, key, expires, contentType)
+	return fmt.Sprintf("%s/%s?expires=%d&sig=%s",
+		strings.TrimSuffix(c.config.PublicBaseURL, "/"), key, expires, sig), nil
+}
+
 // GetPresignedUploadURL implements Client.
-// For local storage, returns the absolute file path (no presign needed).
+// For local storage, returns a signed PUT URL into Config.PublicBaseURL
+// (contentType is bound into the signature), or the absolute file path when
+// no public base is configured.
 func (c *localClient) GetPresignedUploadURL(key, contentType string, expiry time.Duration) (string, error) {
-	return filepath.Join(c.basePath, normalizeKey(key)), nil
+	return c.presignURL("PUT", key, contentType, expiry)
 }
 
 // GetPresignedGetURL implements Client.
-// For local storage, returns the absolute file path (no presign needed).
+// For local storage, returns a signed GET URL into Config.PublicBaseURL, or
+// the absolute file path when no public base is configured.
 func (c *localClient) GetPresignedGetURL(key string, expiry time.Duration) (string, error) {
-	return filepath.Join(c.basePath, normalizeKey(key)), nil
+	return c.presignURL("GET", key, "", expiry)
 }
 
 // GetPublicURL implements Client.
-// For local storage, returns the absolute file path.
+// For local storage, returns the unsigned URL under Config.PublicBaseURL, or
+// the absolute file path when no public base is configured.
 func (c *localClient) GetPublicURL(key string) string {
-	return filepath.Join(c.basePath, normalizeKey(key))
+	key = normalizeKey(key)
+	if c.config.PublicBaseURL == "" {
+		return filepath.Join(c.basePath, key)
+	}
+	return strings.TrimSuffix(c.config.PublicBaseURL, "/") + "/" + key
 }
 
 // GetSize implements Client.
@@ -74,10 +135,14 @@ func (c *localClient) GetSize(prefix string) (int64, error) {
 	fullPath := filepath.Join(c.basePath, prefix)
 	info, err := os.Stat(fullPath)
 	if err == nil {
-		return info.Size(), nil
-	}
-	if !os.IsNotExist(err) {
-		return 0, fmt.Errorf("gostorage local: stat file: %w", err)
+		if !info.IsDir() {
+			return info.Size(), nil
+		}
+	} else if os.IsNotExist(err) {
+		// nothing is stored under the prefix
+		return 0, nil
+	} else {
+		return 0, fmt.Errorf("gostorage local: stat path: %w", err)
 	}
 
 	// Prefix is a directory, calculate all files under it
@@ -129,6 +194,10 @@ func (c *localClient) ListObjects(prefix string) ([]ObjectInfo, error) {
 		})
 		return nil
 	})
+	if os.IsNotExist(err) {
+		// nothing is stored under the prefix
+		return res, nil
+	}
 
 	return res, err
 }

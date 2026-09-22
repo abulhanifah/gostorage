@@ -100,8 +100,20 @@ type Config struct {
 	// service_role API key used as the Bearer token.
 	AccessKey string
 
-	// SecretKey is the provider secret key.
+	// SecretKey is the provider secret key. For local storage it is the HMAC
+	// key used to sign local presigned URLs (see PublicBaseURL).
 	SecretKey string
+
+	// PublicBaseURL is the externally reachable HTTP base under which local
+	// filesystem objects are served and uploaded, e.g.
+	// "https://files.example.com/storages".
+	//
+	// It is only used by the local provider. When set, GetPresignedUploadURL
+	// and GetPresignedGetURL return expiring URLs into PublicBaseURL signed
+	// with LocalSign, and GetPublicURL returns an unsigned URL under the same
+	// base; otherwise all three return the absolute on-disk path of the
+	// object, preserving the legacy behavior.
+	PublicBaseURL string
 
 	// Context is the base context used for storage operations. Defaults to
 	// context.Background() when nil.
@@ -193,7 +205,9 @@ type Client interface {
 	//
 	// For S3, MinIO and OSS the returned URL is an HTTP GET request for
 	// bucket/key. For Supabase a signed download URL is returned instead;
-	// expiry is honored at one-second precision.
+	// expiry is honored at one-second precision. For local, when
+	// Config.PublicBaseURL is set, an expiring GET URL under that base is
+	// returned; otherwise the on-disk path is returned (see GetPresignedUploadURL).
 	//
 	// Returns an error only when the provider rejects the signing
 	// operation.
@@ -204,7 +218,9 @@ type Client interface {
 	// The object must be publicly readable through the provider's bucket
 	// policy; no signing or credentials are involved and this method never
 	// returns an error. An empty key yields a URL ending with the bucket
-	// path.
+	// path. For local, when Config.PublicBaseURL is set, the returned URL is
+	// an unsigned URL under that base; otherwise the on-disk path is
+	// returned.
 	GetPublicURL(key string) string
 
 	// GetSize returns the total size in bytes of every object stored under
