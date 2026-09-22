@@ -214,3 +214,35 @@ func ExampleClient_Kind() {
 	// Output:
 	// s3
 }
+
+// ExampleLocal demonstrates using local filesystem storage.
+func ExampleLocal() {
+	client, err := NewLocal(Config{
+		Kind:     KindLocal,
+		Name:     "local-storage",
+		Endpoint: "/tmp/storage",
+	})
+	if err != nil {
+		panic(err)
+	}
+
+	key := "documents/report.pdf"
+
+	uploadURL, err := client.GetPresignedUploadURL(key, "application/pdf", DefaultPresignUploadExpiry)
+	if err != nil {
+		panic(err)
+	}
+	fmt.Println("upload URL:", uploadURL)
+
+	downloadURL, err := client.GetPresignedGetURL(key, DefaultPresignGetExpiry)
+	if err != nil {
+		panic(err)
+	}
+	fmt.Println("download URL:", downloadURL)
+
+	fmt.Println("public URL:", client.GetPublicURL(key))
+	// Output:
+	// upload URL: /tmp/storage/documents/report.pdf
+	// download URL: /tmp/storage/documents/report.pdf
+	// public URL: /tmp/storage/documents/report.pdf
+}

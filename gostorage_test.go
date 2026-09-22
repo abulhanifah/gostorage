@@ -87,8 +87,12 @@ func TestNormalize(t *testing.T) {
 		t.Errorf("Bucket = %q, want explicit files", c.Bucket)
 	}
 
-	if _, err := (Config{Type: "zahir-local"}).normalize(); err == nil {
-		t.Error("normalize should reject unsupported kind")
+	c, err = (Config{Type: "zahir-local", Name: "local-store", Endpoint: "/tmp/storage"}).normalize()
+	if err != nil {
+		t.Fatalf("normalize should accept local kind: %v", err)
+	}
+	if c.Kind != KindLocal {
+		t.Errorf("Kind = %q, want local", c.Kind)
 	}
 }
 
@@ -119,6 +123,13 @@ func TestNewFactory(t *testing.T) {
 		t.Fatalf("NewGCS: %v", err)
 	} else if _, ok := c.(*gcsClient); !ok {
 		t.Errorf("NewGCS returned %T, want *gcsClient", c)
+	}
+
+	local := Config{Name: "local-test", Endpoint: "/tmp/gostorage-test"}
+	if c, err := NewLocal(local); err != nil {
+		t.Fatalf("NewLocal: %v", err)
+	} else if _, ok := c.(*localClient); !ok {
+		t.Errorf("NewLocal returned %T, want *localClient", c)
 	}
 
 	if _, err := New(Config{Type: "zahir-ftp"}); err == nil {
@@ -292,7 +303,7 @@ func TestGCSPresignWithoutKey(t *testing.T) {
 }
 
 func TestSupportedKinds(t *testing.T) {
-	if got := SupportedKinds(); len(got) != 5 {
-		t.Errorf("SupportedKinds len = %d, want 5", len(got))
+	if got := SupportedKinds(); len(got) != 6 {
+		t.Errorf("SupportedKinds len = %d, want 6", len(got))
 	}
 }

@@ -55,10 +55,13 @@ const (
 
 	// KindGCS is Google Cloud Storage.
 	KindGCS Kind = "gcs"
+
+	// KindLocal is local filesystem storage using file:// URLs.
+	KindLocal Kind = "local"
 )
 
 // knownKinds is the canonical set of supported providers.
-var knownKinds = []Kind{KindS3, KindMinio, KindSupabase, KindOSS, KindGCS}
+var knownKinds = []Kind{KindS3, KindMinio, KindSupabase, KindOSS, KindGCS, KindLocal}
 
 // SupportedKinds returns all storage kinds supported by this library.
 func SupportedKinds() []Kind {
@@ -262,6 +265,8 @@ func New(cfg Config) (Client, error) {
 		return newOSS(c)
 	case KindGCS:
 		return newGCS(c)
+	case KindLocal:
+		return newLocal(c)
 	default:
 		// Unreachable: normalize already validated the kind.
 		return nil, fmt.Errorf("gostorage: unsupported storage kind %q", c.Kind)
@@ -297,6 +302,13 @@ func NewOSS(cfg Config) (Client, error) {
 // NewGCS builds a Google Cloud Storage client. cfg.Kind is forced to KindGCS.
 func NewGCS(cfg Config) (Client, error) {
 	cfg.Kind = KindGCS
+	return New(cfg)
+}
+
+// NewLocal builds a local filesystem storage client. cfg.Kind is forced to
+// KindLocal.
+func NewLocal(cfg Config) (Client, error) {
+	cfg.Kind = KindLocal
 	return New(cfg)
 }
 
