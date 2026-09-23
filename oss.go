@@ -23,8 +23,18 @@ type ossClient struct {
 
 // newOSS creates an Alibaba Cloud OSS client.
 func newOSS(cfg Config) (Client, error) {
+	// The OSS v4 signer embeds the region into the credential scope
+	// (…/YYYYMMDD/{region}/oss/aliyun_v4_request). If it is empty the server
+	// rejects the request with AuthorizationArgumentError ("the signing region
+	// is invalid"). The scope must carry the bare region (e.g. "ap-southeast-5");
+	// the "oss-" prefix belongs only to the endpoint host and is never added by
+	// the SDK, so strip it if present and derive it from the endpoint host when
+	// the caller did not configure it. This guarantees the scope region is never
+	// empty and never duplicated (no "oss-oss-…").
+	region := normalizeOSSRegion(cfg.Region, cfg.Endpoint)
 	ossCfg := &oss.Config{
 		Endpoint:            oss.Ptr(cfg.Endpoint),
+		Region:              oss.Ptr(region),
 		CredentialsProvider: credentials.NewStaticCredentialsProvider(cfg.AccessKey, cfg.SecretKey),
 	}
 	client := oss.NewClient(ossCfg)
@@ -35,6 +45,36 @@ func newOSS(cfg Config) (Client, error) {
 		endpoint: endpoint,
 		scheme:   scheme,
 	}, nil
+}
+
+// normalizeOSSRegion returns the bare region to embed in the OSS v4 credential
+// scope. The scope carries the bare region (e.g. "ap-southeast-5"); the
+// "oss-" prefix belongs only to the endpoint host and is never added by the
+// SDK, so strip it when the caller configured a prefixed region and derive the
+// bare region from the endpoint host when the caller left it empty. The result
+// is never empty (an empty region makes the server reject the request) and
+// never duplicated (no "oss-oss-…").
+func normalizeOSSRegion(region, endpoint string) string {
+	region = strings.TrimSpace(region)
+	if strings.HasPrefix(region, "oss-") {
+		region = strings.TrimPrefix(region, "oss-")
+	}
+	if region == "" {
+		// Derive from the endpoint host. OSS endpoints use the form
+		// "oss-{region}.aliyuncs.com"; strip the scheme and the leading "oss-".
+		ep := strings.TrimSuffix(endpoint, "/")
+		if i := strings.Index(ep, "://"); i >= 0 {
+			ep = ep[i+len("://"):]
+		}
+		if i := strings.Index(ep, "/"); i >= 0 {
+			ep = ep[:i]
+		}
+		if strings.HasPrefix(ep, "oss-") {
+			ep = strings.TrimPrefix(ep, "oss-")
+		}
+		region = ep
+	}
+	return region
 }
 
 // GetPresignedUploadURL implements Client.
